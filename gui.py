@@ -17,6 +17,8 @@ from typing import Any
 
 from PIL import Image, ImageTk
 
+import ai
+import comps
 import exporters
 import lookup
 from db import Database
@@ -134,6 +136,7 @@ class InventoryApp(tk.Tk):
         ttk.Button(bottom, text="Export Facebook CSV", command=self._export_facebook).pack(side="left", padx=6)
         ttk.Button(bottom, text="Export Generic CSV", command=self._export_generic).pack(side="left")
         ttk.Button(bottom, text="Open Data Folder", command=self._open_data_folder).pack(side="left", padx=6)
+        ttk.Button(bottom, text="Settings", command=self._open_settings).pack(side="left")
 
         self.status_var = tk.StringVar(value="Ready. Plug in your scan gun and start scanning.")
         ttk.Label(bottom, textvariable=self.status_var, anchor="e").pack(side="right", fill="x", expand=True)
@@ -170,13 +173,22 @@ class InventoryApp(tk.Tk):
         # numeric row
         ttk.Label(self.detail, text="Cost").grid(row=10, column=0, sticky="w", pady=2)
         self.detail_fields["cost"] = tk.StringVar()
-        ttk.Entry(self.detail, textvariable=self.detail_fields["cost"], width=10).grid(row=10, column=1, sticky="w", padx=(6, 4))
+        cost_entry = ttk.Entry(self.detail, textvariable=self.detail_fields["cost"], width=10)
+        cost_entry.grid(row=10, column=1, sticky="w", padx=(6, 4))
         ttk.Label(self.detail, text="Price").grid(row=10, column=1, sticky="e", padx=(0, 70))
         self.detail_fields["price"] = tk.StringVar()
-        ttk.Entry(self.detail, textvariable=self.detail_fields["price"], width=10).grid(row=10, column=2, sticky="w")
+        price_entry = ttk.Entry(self.detail, textvariable=self.detail_fields["price"], width=10)
+        price_entry.grid(row=10, column=2, sticky="w")
         ttk.Label(self.detail, text="Qty").grid(row=10, column=2, sticky="e", padx=(0, 50))
         self.detail_fields["quantity"] = tk.StringVar()
         ttk.Entry(self.detail, textvariable=self.detail_fields["quantity"], width=6).grid(row=10, column=3, sticky="w")
+
+        # Net profit (price - cost), recomputed live as you edit cost/price
+        self.profit_var = tk.StringVar(value="Net profit  $0.00 (0%)")
+        self.profit_label = ttk.Label(self.detail, textvariable=self.profit_var, foreground="#0a8a3a")
+        self.profit_label.grid(row=10, column=3, sticky="e", padx=(0, 4))
+        self.detail_fields["cost"].trace_add("write", lambda *_a: self._recalc_profit())
+        self.detail_fields["price"].trace_add("write", lambda *_a: self._recalc_profit())
 
         ttk.Label(self.detail, text="Image URL").grid(row=11, column=0, sticky="w", pady=2)
         self.detail_fields["image_url"] = tk.StringVar()
@@ -192,9 +204,15 @@ class InventoryApp(tk.Tk):
         self.notes_text = tk.Text(self.detail, height=3, width=40, wrap="word")
         self.notes_text.grid(row=13, column=1, columnspan=3, sticky="ew", padx=(6, 0), pady=2)
 
+        ai_row = ttk.Frame(self.detail)
+        ai_row.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        ttk.Button(ai_row, text="AI Listing", command=self._ai_listing).pack(side="left")
+        ttk.Button(ai_row, text="AI Category", command=self._ai_category).pack(side="left", padx=6)
+        ttk.Button(ai_row, text="Sold-Comp Lookup", command=self._sold_comp_lookup).pack(side="left")
+
         button_row = ttk.Frame(self.detail)
-        button_row.grid(row=14, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-        ttk.Button(button_row, text="Save changes", command=self._save_detail).pack(side="left")
+        button_row.grid(row=15, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Button(button_row, text="Save", command=self._save_detail).pack(side="left")
         ttk.Button(button_row, text="Mark Sold", command=self._mark_sold).pack(side="left", padx=6)
         ttk.Button(button_row, text="Re-fetch from web", command=self._refetch).pack(side="left")
         ttk.Button(button_row, text="Delete", command=self._delete_selected).pack(side="right")
@@ -457,6 +475,208 @@ class InventoryApp(tk.Tk):
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    # ------------------------------------------------------------------
+    # Net profit
+    # ------------------------------------------------------------------
+    def _recalc_profit(self) -> None:
+        cost = _to_float(self.detail_fields["cost"].get())
+        price = _to_float(self.detail_fields["price"].get())
+        profit = price - cost
+        pct = (profit / cost * 100) if cost > 0 else 0
+        sign = "+" if profit >= 0 else "-"
+        self.profit_var.set(f"Net profit  {sign}${abs(profit):,.2f} ({pct:+.0f}%)")
+        self.profit_label.configure(foreground="#0a8a3a" if profit >= 0 else "#b00020")
+
+    # ------------------------------------------------------------------
+    # Settings (Gemini API key)
+    # ------------------------------------------------------------------
+    def _open_settings(self) -> None:
+        current = ai.get_api_key() or ""
+        masked = (current[:4] + "…" + current[-4:]) if len(current) > 8 else current
+        prompt = "Paste your Google Gemini API key.\nGet one free at https://aistudio.google.com/apikey"
+        if current:
+            prompt += f"\n\nCurrent key: {masked}"
+        key = simpledialog.askstring(APP_TITLE, prompt, parent=self, show="*")
+        if key is None:
+            return
+        ai.set_api_key(key)
+        self._set_status("Gemini API key saved." if key else "Gemini API key cleared.")
+
+    def _require_api_key(self) -> str | None:
+        key = ai.get_api_key()
+        if not key:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No Gemini API key set yet.\n\n"
+                "Click Settings to paste one. Free keys: "
+                "https://aistudio.google.com/apikey",
+            )
+            return None
+        return key
+
+    # ------------------------------------------------------------------
+    # AI Listing
+    # ------------------------------------------------------------------
+    def _ai_listing(self) -> None:
+        if self._selected_id is None:
+            return
+        key = self._require_api_key()
+        if not key:
+            return
+        item = self._collect_detail()
+        self._set_status("Generating listing with Gemini…")
+        threading.Thread(
+            target=self._ai_listing_worker,
+            args=(self._selected_id, item, key),
+            daemon=True,
+        ).start()
+
+    def _ai_listing_worker(self, item_id: int, item: dict[str, Any], key: str) -> None:
+        try:
+            result = ai.generate_listing(item, key)
+            self.after(0, lambda: self._apply_ai_listing(item_id, result))
+        except Exception as exc:
+            msg = str(exc)
+            self.after(0, lambda: self._set_status(f"AI Listing failed: {msg}"))
+            self.after(0, lambda: messagebox.showerror(APP_TITLE, msg))
+
+    def _apply_ai_listing(self, item_id: int, result: dict[str, str]) -> None:
+        if self._selected_id != item_id:
+            return
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Replace title and description with AI version?\n\n"
+            f"New title:\n{result.get('title','')}\n\n"
+            f"New description:\n{result.get('description','')[:300]}…",
+        ):
+            self._set_status("AI listing discarded.")
+            return
+        self.detail_fields["title"].set(result.get("title", ""))
+        self.description_text.delete("1.0", "end")
+        self.description_text.insert("1.0", result.get("description", ""))
+        self._save_detail()
+
+    # ------------------------------------------------------------------
+    # AI Category
+    # ------------------------------------------------------------------
+    def _ai_category(self) -> None:
+        if self._selected_id is None:
+            return
+        key = self._require_api_key()
+        if not key:
+            return
+        item = self._collect_detail()
+        self._set_status("Suggesting category…")
+        threading.Thread(
+            target=self._ai_category_worker,
+            args=(self._selected_id, item, key),
+            daemon=True,
+        ).start()
+
+    def _ai_category_worker(self, item_id: int, item: dict[str, Any], key: str) -> None:
+        try:
+            cat = ai.suggest_category(item, key)
+            self.after(0, lambda: self._apply_ai_category(item_id, cat))
+        except Exception as exc:
+            msg = str(exc)
+            self.after(0, lambda: self._set_status(f"AI Category failed: {msg}"))
+            self.after(0, lambda: messagebox.showerror(APP_TITLE, msg))
+
+    def _apply_ai_category(self, item_id: int, cat: str) -> None:
+        if self._selected_id != item_id:
+            return
+        self.detail_fields["category"].set(cat)
+        self._set_status(f"Category set to: {cat}")
+
+    # ------------------------------------------------------------------
+    # Sold-comp lookup
+    # ------------------------------------------------------------------
+    def _sold_comp_lookup(self) -> None:
+        if self._selected_id is None:
+            return
+        title = self.detail_fields["title"].get().strip()
+        brand = self.detail_fields["brand"].get().strip()
+        model = self.detail_fields["model"].get().strip()
+        default_query = " ".join(x for x in [brand, model, title] if x).strip() or title
+        query = simpledialog.askstring(
+            APP_TITLE, "Search eBay sold listings for:", initialvalue=default_query, parent=self,
+        )
+        if not query:
+            return
+        self._set_status(f"Looking up sold comps for: {query}…")
+        threading.Thread(
+            target=self._sold_comp_worker,
+            args=(self._selected_id, query),
+            daemon=True,
+        ).start()
+
+    def _sold_comp_worker(self, item_id: int, query: str) -> None:
+        try:
+            results = comps.lookup_sold_comps(query)
+            summary = comps.summarize(results)
+            self.after(0, lambda: self._show_sold_comps(item_id, query, results, summary))
+        except Exception as exc:
+            msg = str(exc)
+            self.after(0, lambda: self._set_status(f"Comp lookup failed: {msg}"))
+            self.after(0, lambda: messagebox.showerror(APP_TITLE, msg))
+
+    def _show_sold_comps(
+        self,
+        item_id: int,
+        query: str,
+        results: list[dict[str, Any]],
+        summary: dict[str, Any] | None,
+    ) -> None:
+        if self._selected_id != item_id:
+            return
+        if not results:
+            messagebox.showinfo(APP_TITLE, f"No sold listings found for:\n{query}")
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Sold comps — {query}")
+        win.geometry("760x520")
+
+        header_text = f"{summary['count']} sold results" if summary else f"{len(results)} results"
+        if summary:
+            header_text += (
+                f"   |   median ${summary['median']:.2f}"
+                f"   |   avg ${summary['average']:.2f}"
+                f"   |   range ${summary['min']:.2f}–${summary['max']:.2f}"
+            )
+        ttk.Label(win, text=header_text, padding=10, font=("", 10, "bold")).pack(fill="x")
+
+        cols = ("price", "title")
+        tree = ttk.Treeview(win, columns=cols, show="headings")
+        tree.heading("price", text="Sold price")
+        tree.heading("title", text="Title")
+        tree.column("price", width=110, anchor="e", stretch=False)
+        tree.column("title", width=600, anchor="w")
+        for r in results:
+            tree.insert("", "end", values=(r["price_text"], r["title"]))
+        vsb = ttk.Scrollbar(win, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+        vsb.pack(side="left", fill="y", padx=(0, 10), pady=10)
+
+        if summary:
+            btn_row = ttk.Frame(win)
+            btn_row.pack(fill="x", padx=10, pady=(0, 10))
+            ttk.Button(
+                btn_row, text=f"Use median (${summary['median']:.2f}) as price",
+                command=lambda: self._apply_comp_price(summary["median"], win),
+            ).pack(side="left")
+            ttk.Button(
+                btn_row, text=f"Use average (${summary['average']:.2f})",
+                command=lambda: self._apply_comp_price(summary["average"], win),
+            ).pack(side="left", padx=6)
+            ttk.Button(btn_row, text="Close", command=win.destroy).pack(side="right")
+
+    def _apply_comp_price(self, price: float, win: tk.Toplevel) -> None:
+        self.detail_fields["price"].set(f"{price:.2f}")
+        win.destroy()
+        self._set_status(f"Price set to ${price:.2f} from sold comps.")
 
 
 def _to_float(value: Any) -> float:
